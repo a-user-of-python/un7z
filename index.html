@@ -60,8 +60,10 @@
 
   <p class="note">Everything runs locally with 7-Zip compiled to WebAssembly. Files live only in memory until you download them — close the tab and they're gone.</p>
 
-<script type="module">
-import SevenZip from 'https://cdn.jsdelivr.net/npm/7z-wasm@1.2.0/7zz.es6.js';
+<script>
+// Non-module script: UI works even if the 7-Zip library fails to load.
+// The library is imported dynamically with error handling below.
+const SZ_URL = 'https://cdn.jsdelivr.net/npm/7z-wasm@1.2.0/7zz.es6.js';
 
 const drop = document.getElementById('drop');
 const dropText = document.getElementById('dropText');
@@ -86,7 +88,8 @@ function fmtSize(n) {
 async function getSevenZip() {
   if (!sevenZip) {
     setStatus('<span class="spinner"></span>Loading 7-Zip engine…');
-    sevenZip = await SevenZip();
+    const mod = await import(SZ_URL);
+    sevenZip = await mod.default();
   }
   return sevenZip;
 }
@@ -104,6 +107,9 @@ function walkFS(sz, dir, out) {
 
 async function extract(file) {
   filesEl.innerHTML = '';
+  setStatus('<span class="spinner"></span>Starting…');
+  // Let the UI paint before the heavy work begins.
+  await new Promise(r => setTimeout(r, 50));
   try {
     const sz = await getSevenZip();
     setStatus('<span class="spinner"></span>Extracting ' + file.name + '…');
@@ -161,7 +167,8 @@ async function extract(file) {
     }
   } catch (e) {
     console.error(e);
-    setStatus('Failed: ' + (e && e.message ? e.message : e) + '. Wrong password?', true);
+    const msg = (e && e.message) ? e.message : String(e);
+    setStatus('Failed: ' + msg + '<br><small>Try a smaller file, or check your connection (the 7-Zip engine loads from a CDN on first use).</small>', true);
   }
 }
 
