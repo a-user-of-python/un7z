@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>un7z — unzip .7z in your browser</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: #111; color: #eee;
+    font-family: system-ui, -apple-system, sans-serif; font-size: 20px;
+    display: flex; flex-direction: column; align-items: center; padding: 24px 16px;
+  }
+  h1 { font-size: 40px; margin: 8px 0 4px; }
+  p.sub { color: #999; margin: 0 0 24px; text-align: center; max-width: 560px; }
+  #drop {
+    width: 100%; max-width: 560px; min-height: 220px;
+    border: 3px dashed #555; border-radius: 16px;
+    display: flex; align-items: center; justify-content: center;
+    text-align: center; padding: 32px; cursor: pointer; font-size: 24px; color: #bbb;
+  }
+  #drop.over { border-color: #4da3ff; background: #1a2a40; color: #fff; }
+  #drop input { display: none; }
+  #pw { margin-top: 16px; font-size: 20px; padding: 12px 16px; border-radius: 10px;
+        border: 1px solid #444; background: #1c1c1c; color: #eee; width: 100%; max-width: 560px; }
+  #status { margin: 20px 0; min-height: 28px; color: #8fd08f; text-align: center; max-width: 560px; }
+  #status.err { color: #ff8080; }
+  #files { width: 100%; max-width: 560px; list-style: none; padding: 0; margin: 0; }
+  #files li {
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    background: #1c1c1c; border: 1px solid #333; border-radius: 10px;
+    padding: 12px 16px; margin-bottom: 8px; word-break: break-all;
+  }
+  #files .size { color: #888; font-size: 16px; white-space: nowrap; }
+  #files a {
+    background: #2a6fd6; color: #fff; text-decoration: none; font-weight: 600;
+    padding: 10px 18px; border-radius: 10px; white-space: nowrap; font-size: 18px;
+  }
+  #files a:active { background: #1f5cb8; }
+  .note { color: #666; font-size: 15px; margin-top: 28px; text-align: center; max-width: 560px; }
+  .spinner { display: inline-block; width: 22px; height: 22px; border: 3px solid #444;
+             border-top-color: #4da3ff; border-radius: 50%; animation: spin 0.8s linear infinite;
+             vertical-align: -4px; margin-right: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <h1>un7z</h1>
+  <p class="sub">Drop a <b>.7z</b> file — it extracts entirely in your browser. Nothing is uploaded or stored anywhere.</p>
+
+  <label id="drop">
+    <span id="dropText">Tap or drop a .7z file here</span>
+    <input type="file" id="fileInput" accept=".7z">
+  </label>
+  <input type="password" id="pw" placeholder="Password (only if the archive needs one)" autocomplete="off">
+
+  <div id="status"></div>
+  <ul id="files"></ul>
+
+  <p class="note">Everything runs locally with 7-Zip compiled to WebAssembly. Files live only in memory until you download them — close the tab and they're gone.</p>
+
+<script type="module">
+import SevenZip from 'https://cdn.jsdelivr.net/npm/7z-wasm@1.1.0/7zz.es6.js';
+
+const drop = document.getElementById('drop');
+const dropText = document.getElementById('dropText');
+const fileInput = document.getElementById('fileInput');
+const pwInput = document.getElementById('pw');
+const status = document.getElementById('status');
+const filesEl = document.getElementById('files');
+
+let sevenZip = null;
+
+function setStatus(html, isErr = false) {
+  status.innerHTML = html;
+  status.className = isErr ? 'err' : '';
+}
+function fmtSize(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+  return (n / 1073741824).toFixed(2) + ' GB';
+}
+
+async function getSevenZip() {
+  if (!sevenZip) {
+    setStatus('<span class="spinner"></span>Loading 7-Zip engine…');
+    sevenZip = await SevenZip();
+  }
+  return sevenZip;
+}
+
+// Recursively collect files under a dir in the Emscripten FS.
+function walkFS(sz, dir, out) {
+  for (const name of sz.FS.readdir(dir)) {
+    if (name === '.' || name === '..') continue;
+    const path = dir === '/' ? '/' + name : dir + '/' + name;
+    const st = sz.FS.stat(path);
+    if (sz.FS.isDir(st.mode)) walkFS(sz, path, out);
+    else out.push({ path, size: st.size });
+  }
+}
+
+async function extract(file) {
+  filesEl.innerHTML = '';
+  try {
+    const sz = await getSevenZip();
+    setStatus('<span class="spinner"></span>Extracting ' + file.name + '…');
+
+    // Clean slate in the virtual FS.
+    try { sz.FS.unlink('/archive.7z'); } catch (e) {}
+    try {
+      const del = (p) => {
+        for (const n of sz.FS.readdir(p)) {
+          if (n === '.' || n === '..') continue;
+          const fp = p + '/' + n;
+          if (sz.FS.isDir(sz.FS.stat(fp).mode)) del(fp);
+          else sz.FS.unlink(fp);
+        }
+        sz.FS.rmdir(p);
+      };
+      del('/out');
+    } catch (e) {}
+    sz.FS.mkdir('/out');
+
+    sz.FS.writeFile('/archive.7z', new Uint8Array(await file.arrayBuffer()));
+
+    const args = ['x', '/archive.7z', '-o/out', '-y'];
+    const pw = pwInput.value;
+    if (pw) args.push('-p' + pw);
+    sz.callMain(args);
+
+    const found = [];
+    walkFS(sz, '/out', found);
+    // Strip the leading "/out" for display/download names.
+    const items = found.map(f => ({ name: f.path.replace(/^\/out\//, ''), data: sz.FS.readFile(f.path), size: f.size }))
+                       .sort((a, b) => a.name.localeCompare(b.name));
+
+    if (!items.length) {
+      setStatus('Archive extracted but contained no files.', true);
+      return;
+    }
+    setStatus('Done — ' + items.length + ' file' + (items.length === 1 ? '' : 's') + ' extracted.');
+    for (const it of items) {
+      const li = document.createElement('li');
+      const label = document.createElement('span');
+      label.textContent = it.name + ' ';
+      const szSpan = document.createElement('span');
+      szSpan.className = 'size';
+      szSpan.textContent = fmtSize(it.size);
+      label.appendChild(szSpan);
+      const a = document.createElement('a');
+      const blob = new Blob([it.data], { type: 'application/octet-stream' });
+      a.href = URL.createObjectURL(blob);
+      a.download = it.name.split('/').pop();
+      a.textContent = 'Download';
+      li.appendChild(label);
+      li.appendChild(a);
+      filesEl.appendChild(li);
+    }
+  } catch (e) {
+    console.error(e);
+    setStatus('Failed: ' + (e && e.message ? e.message : e) + '. Wrong password?', true);
+  }
+}
+
+drop.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length) extract(fileInput.files[0]);
+  fileInput.value = '';
+});
+['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.add('over');
+}));
+['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => {
+  e.preventDefault(); drop.classList.remove('over');
+}));
+drop.addEventListener('drop', e => {
+  const f = e.dataTransfer.files[0];
+  if (f) extract(f);
+});
+</script>
+</body>
+</html>
