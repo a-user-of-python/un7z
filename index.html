@@ -94,6 +94,30 @@ function fmtSize(n) {
   return (n / 1073741824).toFixed(2) + ' GB';
 }
 
+// --- Size guard ---
+// A phone browser must hold the whole archive in memory to extract it, so a
+// huge file just chokes silently. Fail fast with a clear message instead.
+const HARD_LIMIT = 2 * 1024 * 1024 * 1024;  // 2 GB
+const WARN_LIMIT = 250 * 1024 * 1024;       // 250 MB
+const IS_MOBILE = typeof navigator !== 'undefined' &&
+  /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+
+function sizeBlocked(file) {
+  // Returns true (and shows the message) when the file can't work on this device.
+  if (IS_MOBILE && file.size > HARD_LIMIT) {
+    setStatus(
+      'This file is <b>' + fmtSize(file.size) + '</b> — way too big for a phone browser.<br><br>' +
+      'Unzip it on a computer instead:<br>' +
+      '<b>Mac:</b> run <code>brew install p7zip</code>, then <code>7z x yourfile.7z</code><br>' +
+      'or install <b>Keka</b> (free) and double-click the archive.<br><br>' +
+      'This page works fine for normal-sized archives.',
+      true
+    );
+    return true;
+  }
+  return false;
+}
+
 async function getSevenZip() {
   if (!sevenZip) {
     setStatus('<span class="spinner"></span>Loading 7-Zip engine…');
@@ -115,13 +139,18 @@ function walkFS(sz, dir, out) {
 }
 
 async function extract(file) {
+  if (sizeBlocked(file)) return;  // hopeless on this device — message already shown
   filesEl.innerHTML = '';
   setStatus('<span class="spinner"></span>Starting…');
   // Let the UI paint before the heavy work begins.
   await new Promise(r => setTimeout(r, 50));
   try {
     const sz = await getSevenZip();
-    setStatus('<span class="spinner"></span>Extracting ' + file.name + '…');
+    setStatus('<span class="spinner"></span>Extracting ' + file.name + '…' +
+      (file.size > WARN_LIMIT
+        ? '<br><small>Big file (' + fmtSize(file.size) + ') — this may take a while' +
+          (IS_MOBILE ? ', and a phone browser may run out of memory' : '') + '.</small>'
+        : ''));
 
     // Clean slate in the virtual FS.
     try { sz.FS.unlink('/archive.7z'); } catch (e) {}
